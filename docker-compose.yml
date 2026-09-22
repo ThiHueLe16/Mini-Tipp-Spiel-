@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tippspiel-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: tippspiel_db
+      POSTGRES_USER: check24_user
+      POSTGRES_PASSWORD: check24_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: tippspiel-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

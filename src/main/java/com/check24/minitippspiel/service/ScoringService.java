@@ -32,6 +32,11 @@ public class ScoringService {
         Match match = matchRepository.findById(matchId)
                 .orElseThrow(() -> new IllegalArgumentException("Match not found with ID: " + matchId));
 
+
+//      isEvaluated = true means the match has ended, official final scores were entered,
+//      every user's prediction was scored, and user total points were updated.
+//      Checking if (match.isEvaluated()) prevents an admin from accidentally triggering points calculation twice
+//      for the same match.
         if (match.isEvaluated()) {
             throw new IllegalStateException("Match has already been evaluated!");
         }

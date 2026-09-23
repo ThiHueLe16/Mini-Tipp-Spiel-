@@ -12,11 +12,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
 public class PredictionService {
-    //this class handles saving user predictions
 
     private final PredictionRepository predictionRepository;
     private final UserRepository userRepository;
@@ -30,12 +31,10 @@ public class PredictionService {
         Match match = matchRepository.findById(dto.matchId())
                 .orElseThrow(() -> new IllegalArgumentException("Match not found: " + dto.matchId()));
 
-        // Check if kickoff time has already passed
         if (match.getKickoffTime().isBefore(Instant.now())) {
             throw new IllegalStateException("Cannot submit prediction after match kickoff!");
         }
 
-        // Upsert logic: Update existing prediction or create a new one
         Prediction prediction = predictionRepository.findByUserIdAndMatchId(dto.userId(), dto.matchId())
                 .orElseGet(() -> Prediction.builder().user(user).match(match).build());
 
@@ -43,5 +42,22 @@ public class PredictionService {
         prediction.setPredictedAwayGoals(dto.predictedAwayGoals());
 
         return predictionRepository.save(prediction);
+    }
+
+    // --- READ OPERATIONS ---
+
+    @Transactional(readOnly = true)
+    public List<Prediction> getPredictionsByUser(Long userId) {
+        return predictionRepository.findByUserId(userId);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Prediction> getPredictionsByMatch(Long matchId) {
+        return predictionRepository.findByMatchId(matchId);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<Prediction> getPredictionByUserAndMatch(Long userId, Long matchId) {
+        return predictionRepository.findByUserIdAndMatchId(userId, matchId);
     }
 }

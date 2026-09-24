@@ -5,7 +5,7 @@ import {
   loginUser, createMatch, updateMatchScore, evaluateMatch,
   getUserPredictions
 } from './api/client';
-import { Trophy, Shield, Clock, Users, LogOut, PlusCircle, CheckCircle, UserCheck } from 'lucide-react';
+import { Trophy, Shield, Clock, Users, LogOut, PlusCircle, CheckCircle, UserCheck, Award } from 'lucide-react';
 
 export default function App() {
   // Session & User State
@@ -13,16 +13,17 @@ export default function App() {
     const saved = localStorage.getItem('app_user');
     return saved ? JSON.parse(saved) : null;
   });
-  const [isAuthMode, setIsAuthMode] = useState('login'); // 'login' or 'register'
+  const [isAuthMode, setIsAuthMode] = useState('login');
   const [usernameInput, setUsernameInput] = useState('');
   const [emailInput, setEmailInput] = useState('');
-  const [roleInput, setRoleInput] = useState('USER'); // 'USER' or 'ADMIN'
+  const [roleInput, setRoleInput] = useState('USER');
 
-  // App Navigation
+  // App Navigation & Data
   const [activeTab, setActiveTab] = useState('matches');
   const [matches, setMatches] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
   const [predictions, setPredictions] = useState({});
+  const [now, setNow] = useState(new Date());
 
   // Admin Form State
   const [newHomeTeam, setNewHomeTeam] = useState('');
@@ -41,6 +42,12 @@ export default function App() {
       fetchUserPredictions(currentUser.id);
     }
   }, [currentUser]);
+
+  // Keep live time updated every 30 seconds
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Queue polling
   useEffect(() => {
@@ -62,6 +69,15 @@ export default function App() {
     try {
       const res = await getMatches();
       setMatches(res.data);
+
+      const initialScores = {};
+      res.data.forEach((m) => {
+        initialScores[m.id] = {
+          home: m.finalHomeGoals !== null && m.finalHomeGoals !== undefined ? m.finalHomeGoals : '',
+          away: m.finalAwayGoals !== null && m.finalAwayGoals !== undefined ? m.finalAwayGoals : ''
+        };
+      });
+      setScoreInputs(initialScores);
     } catch (err) {
       console.error('Failed to fetch matches', err);
     }
@@ -84,7 +100,8 @@ export default function App() {
         const matchId = p.match ? p.match.id : p.matchId;
         predictionMap[matchId] = {
           home: p.predictedHomeGoals,
-          away: p.predictedAwayGoals
+          away: p.predictedAwayGoals,
+          pointsEarned: p.pointsEarned ?? p.points ?? null
         };
       });
       setPredictions(predictionMap);
@@ -119,17 +136,66 @@ export default function App() {
     localStorage.removeItem('app_user');
   };
 
+  // Helper for Match Time and Status
+  const getMatchTimeStatus = (kickoffTimeStr) => {
+    if (!kickoffTimeStr) return { status: 'NO_KICKOFF', text: 'Noch nicht gestartet', isStarted: false };
+
+    const kickoff = new Date(kickoffTimeStr);
+    const diffInMs = now - kickoff;
+    const diffInMinutes = Math.floor(diffInMs / (1000 * 60));
+
+    if (diffInMinutes < 0) {
+      return { status: 'NOT_STARTED', text: 'Noch nicht gestartet', isStarted: false };
+    } else if (diffInMinutes <= 105) {
+      return { status: 'LIVE', text: `Live: ${diffInMinutes}'`, isStarted: true, elapsedMinutes: diffInMinutes };
+    } else {
+      return { status: 'FINISHED', text: 'Finished', isStarted: true };
+    }
+  };
+
+  // Helper to calculate points on the client side if backend hasn't stored pointsEarned directly
+  const calculatePoints = (predHome, predAway, finalHome, finalAway) => {
+    if (predHome === undefined || predAway === undefined || finalHome === null || finalAway === null || finalHome === undefined || finalAway === undefined) {
+      return null;
+    }
+
+    const pH = parseInt(predHome, 10);
+    const pA = parseInt(predAway, 10);
+    const fH = parseInt(finalHome, 10);
+    const fA = parseInt(finalAway, 10);
+
+    // Exact score match
+    if (pH === fH && pA === fA) return 3;
+
+    // Correct outcome (Home win, Away win, Draw)
+    const predDiff = pH - pA;
+    const finalDiff = fH - fA;
+
+    if ((predDiff > 0 && finalDiff > 0) || (predDiff < 0 && finalDiff < 0) || (predDiff === 0 && finalDiff === 0)) {
+      return 1;
+    }
+
+    return 0;
+  };
+
   // User Handlers
-  const handlePredictSubmit = async (matchId) => {
-    const pred = predictions[matchId] || { home: 0, away: 0 };
+  const handlePredictSubmit = async (match) => {
+    const timeStatus = getMatchTimeStatus(match.kickoffTime);
+    if (timeStatus.isStarted) {
+      alert('The match has already started! You can no longer modify or submit predictions.');
+      return;
+    }
+
+    const pred = predictions[match.id] || { home: 0, away: 0 };
     try {
       await submitPrediction({
         userId: currentUser.id,
-        matchId: matchId,
+        matchId: match.id,
         predictedHomeGoals: parseInt(pred.home || 0, 10),
         predictedAwayGoals: parseInt(pred.away || 0, 10)
       });
       alert('Prediction submitted successfully!');
+      fetchUserPredictions(currentUser.id);
     } catch (err) {
       alert(err.response?.data?.message || 'Error submitting prediction');
     }
@@ -165,30 +231,53 @@ export default function App() {
   const handleUpdateAndEvaluate = async (matchId) => {
     const score = scoreInputs[matchId];
 
-    // Safely check that inputs are non-empty strings or valid numbers (supports goal count of 0)
     if (!score || score.home === undefined || score.away === undefined || score.home === '' || score.away === '') {
       return alert('Enter home and away scores first');
     }
 
     try {
-      // 1. Update Match Score using backend entity property names: finalHomeGoals / finalAwayGoals
       await updateMatchScore(matchId, {
         finalHomeGoals: parseInt(score.home, 10),
         finalAwayGoals: parseInt(score.away, 10)
       });
 
-      // 2. Evaluate Match Predictions and update leaderboard
       await evaluateMatch(matchId);
 
       alert('Match score updated and points evaluated successfully!');
       fetchMatches();
       fetchLeaderboard();
+      fetchUserPredictions(currentUser.id);
     } catch (err) {
       console.error('Update & Evaluate failed:', err);
       const backendMessage = err.response?.data?.message || (typeof err.response?.data === 'string' ? err.response.data : null);
       alert(`Failed to update match score: ${backendMessage || err.message}`);
     }
   };
+
+  // Group and Sort Matches
+  const getGroupedMatches = () => {
+    const sorted = [...matches].sort((a, b) => new Date(a.kickoffTime) - new Date(b.kickoffTime));
+
+    const groups = {};
+    sorted.forEach((match) => {
+      const dateKey = match.kickoffTime
+          ? new Date(match.kickoffTime).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+          : 'Unscheduled Matches';
+
+      if (!groups[dateKey]) {
+        groups[dateKey] = [];
+      }
+      groups[dateKey].push(match);
+    });
+
+    return groups;
+  };
+
+  const groupedMatches = getGroupedMatches();
+
+  // Get User's Total Points from Leaderboard
+  const currentUserLeaderboardEntry = leaderboard.find(u => u.id === currentUser?.id || u.username === currentUser?.username);
+  const userTotalPoints = currentUserLeaderboardEntry ? (currentUserLeaderboardEntry.totalPoints || 0) : 0;
 
   // -------------------------------------------------------------
   // RENDER LOGIN / REGISTER VIEW
@@ -328,49 +417,146 @@ export default function App() {
         <main className="max-w-5xl mx-auto p-6">
           {/* MATCHES TAB */}
           {activeTab === 'matches' && (
-              <div className="space-y-4">
-                <h2 className="text-xl font-bold text-slate-200 mb-4">Upcoming & Live Matches</h2>
-                {matches.length === 0 ? (
+              <div className="space-y-6">
+                {/* User Points Summary Banner */}
+                <div className="bg-gradient-to-r from-blue-900/60 to-slate-800 p-4 rounded-xl border border-blue-700/50 flex items-center justify-between shadow-lg">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-yellow-500/20 p-2.5 rounded-lg border border-yellow-500/30">
+                      <Award className="w-6 h-6 text-yellow-400" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400 uppercase font-semibold">Your Total Score</p>
+                      <p className="text-lg font-bold text-white">Points Earned Across All Matches</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-3xl font-extrabold text-emerald-400">{userTotalPoints}</span>
+                    <span className="text-sm font-medium text-slate-300 ml-1">pts</span>
+                  </div>
+                </div>
+
+                <h2 className="text-xl font-bold text-slate-200 mb-4">Matches Schedule</h2>
+                {Object.keys(groupedMatches).length === 0 ? (
                     <p className="text-slate-400">No matches available right now.</p>
                 ) : (
-                    matches.map((m) => (
-                        <div key={m.id} className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
-                          <div className="flex items-center gap-6 text-lg font-semibold w-full md:w-auto justify-between md:justify-start">
-                            <span className="w-28 text-right">{m.homeTeam}</span>
-                            <span className="bg-slate-700 px-3 py-1 rounded text-sm text-slate-300">
-                      {m.finalHomeGoals !== null && m.finalAwayGoals !== null && m.finalHomeGoals !== undefined && m.finalAwayGoals !== undefined
-                          ? `${m.finalHomeGoals} : ${m.finalAwayGoals}`
-                          : 'VS'}
-                    </span>
-                            <span className="w-28 text-left">{m.awayTeam}</span>
+                    Object.entries(groupedMatches).map(([dateLabel, dateMatches]) => (
+                        <div key={dateLabel} className="space-y-3">
+                          {/* Date Divider Header */}
+                          <div className="bg-slate-800/80 px-4 py-2 rounded-lg border-l-4 border-blue-500 flex justify-between items-center">
+                            <span className="font-bold text-blue-300 text-sm md:text-base">{dateLabel}</span>
+                            <span className="text-xs text-slate-400">{dateMatches.length} Match(es)</span>
                           </div>
 
-                          <div className="flex items-center gap-3">
-                            <input
-                                type="number" min="0" placeholder="0"
-                                value={predictions[m.id]?.home ?? ''}
-                                className="w-14 bg-slate-900 border border-slate-600 rounded p-2 text-center text-white"
-                                onChange={(e) => setPredictions({
-                                  ...predictions,
-                                  [m.id]: { ...predictions[m.id], home: e.target.value }
-                                })}
-                            />
-                            <span>:</span>
-                            <input
-                                type="number" min="0" placeholder="0"
-                                value={predictions[m.id]?.away ?? ''}
-                                className="w-14 bg-slate-900 border border-slate-600 rounded p-2 text-center text-white"
-                                onChange={(e) => setPredictions({
-                                  ...predictions,
-                                  [m.id]: { ...predictions[m.id], away: e.target.value }
-                                })}
-                            />
-                            <button
-                                onClick={() => handlePredictSubmit(m.id)}
-                                className="ml-4 bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-lg font-medium transition"
-                            >
-                              {predictions[m.id] ? 'Update' : 'Predict'}
-                            </button>
+                          {/* Matches for this date */}
+                          <div className="space-y-3 pl-0 md:pl-2">
+                            {dateMatches.map((m) => {
+                              const timeStatus = getMatchTimeStatus(m.kickoffTime);
+                              const kickoffTimeFormatted = m.kickoffTime
+                                  ? new Date(m.kickoffTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                  : '';
+
+                              const userPred = predictions[m.id];
+                              const isEvaluated = m.finalHomeGoals !== null && m.finalHomeGoals !== undefined && m.finalAwayGoals !== null && m.finalAwayGoals !== undefined;
+
+                              // Points earned calculation
+                              let earnedPoints = userPred?.pointsEarned;
+                              if ((earnedPoints === null || earnedPoints === undefined) && isEvaluated && userPred) {
+                                earnedPoints = calculatePoints(userPred.home, userPred.away, m.finalHomeGoals, m.finalAwayGoals);
+                              }
+
+                              return (
+                                  <div key={m.id} className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
+                                    <div className="flex flex-col items-center md:items-start w-full md:w-auto">
+                                      {/* Teams & Score / VS */}
+                                      <div className="flex items-center gap-4 text-lg font-semibold w-full justify-center md:justify-start">
+                                        <span className="w-28 text-right truncate">{m.homeTeam}</span>
+                                        <span className="bg-slate-700 px-3 py-1 rounded text-sm text-slate-300">
+                                {isEvaluated ? `${m.finalHomeGoals} : ${m.finalAwayGoals}` : 'VS'}
+                              </span>
+                                        <span className="w-28 text-left truncate">{m.awayTeam}</span>
+                                      </div>
+
+                                      {/* Match Time & Real-time Status */}
+                                      <div className="mt-2 flex items-center gap-2 text-xs">
+                                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                        <span className="text-slate-400">{kickoffTimeFormatted}</span>
+                                        <span className="text-slate-600">•</span>
+                                        <span className={`font-medium ${
+                                            timeStatus.status === 'LIVE'
+                                                ? 'text-emerald-400 animate-pulse font-bold'
+                                                : timeStatus.status === 'FINISHED'
+                                                    ? 'text-slate-400'
+                                                    : 'text-amber-400/90'
+                                        }`}>
+                                {timeStatus.text}
+                              </span>
+                                      </div>
+                                    </div>
+
+                                    {/* Prediction Form & Points Indicator */}
+                                    <div className="flex flex-col md:flex-row items-center gap-3">
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                            type="number" min="0" placeholder="0"
+                                            disabled={timeStatus.isStarted}
+                                            value={predictions[m.id]?.home ?? ''}
+                                            className={`w-14 bg-slate-900 border rounded p-2 text-center text-white ${
+                                                timeStatus.isStarted ? 'opacity-50 border-slate-800 cursor-not-allowed' : 'border-slate-600'
+                                            }`}
+                                            onChange={(e) => setPredictions({
+                                              ...predictions,
+                                              [m.id]: { ...predictions[m.id], home: e.target.value }
+                                            })}
+                                        />
+                                        <span>:</span>
+                                        <input
+                                            type="number" min="0" placeholder="0"
+                                            disabled={timeStatus.isStarted}
+                                            value={predictions[m.id]?.away ?? ''}
+                                            className={`w-14 bg-slate-900 border rounded p-2 text-center text-white ${
+                                                timeStatus.isStarted ? 'opacity-50 border-slate-800 cursor-not-allowed' : 'border-slate-600'
+                                            }`}
+                                            onChange={(e) => setPredictions({
+                                              ...predictions,
+                                              [m.id]: { ...predictions[m.id], away: e.target.value }
+                                            })}
+                                        />
+                                        <button
+                                            onClick={() => handlePredictSubmit(m)}
+                                            disabled={timeStatus.isStarted}
+                                            className={`ml-2 px-4 py-2 rounded-lg font-medium transition ${
+                                                timeStatus.isStarted
+                                                    ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                                                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                                            }`}
+                                        >
+                                          {timeStatus.isStarted ? 'Locked' : predictions[m.id] ? 'Update' : 'Predict'}
+                                        </button>
+                                      </div>
+
+                                      {/* Earned Points Badge when evaluated */}
+                                      {isEvaluated && (
+                                          <div className="mt-2 md:mt-0 flex items-center">
+                                            {earnedPoints !== null && earnedPoints !== undefined ? (
+                                                <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${
+                                                    earnedPoints === 3
+                                                        ? 'bg-emerald-950/80 text-emerald-400 border-emerald-600'
+                                                        : earnedPoints === 1
+                                                            ? 'bg-blue-950/80 text-blue-400 border-blue-600'
+                                                            : 'bg-slate-900 text-slate-400 border-slate-700'
+                                                }`}>
+                                    <Award className="w-3.5 h-3.5" />
+                                    +{earnedPoints} {earnedPoints === 1 ? 'pt' : 'pts'}
+                                  </span>
+                                            ) : (
+                                                <span className="text-xs text-slate-500 italic">No prediction</span>
+                                            )}
+                                          </div>
+                                      )}
+                                    </div>
+                                  </div>
+                              );
+                            })}
                           </div>
                         </div>
                     ))
@@ -397,7 +583,7 @@ export default function App() {
                       <tr key={u.id} className={`border-b border-slate-700/50 ${u.id === currentUser.id ? 'bg-blue-900/30 font-bold' : ''}`}>
                         <td className="p-3 text-slate-400">#{idx + 1}</td>
                         <td className="p-3 text-slate-100">{u.username} {u.id === currentUser.id && '(You)'}</td>
-                        <td className="p-3 text-emerald-400">{u.totalPoints || 0} pts</td>
+                        <td className="p-3 text-emerald-400 font-bold">{u.totalPoints || 0} pts</td>
                       </tr>
                   ))}
                   </tbody>
@@ -437,7 +623,7 @@ export default function App() {
           {/* ADMIN PANEL TAB */}
           {activeTab === 'admin' && currentUser.role === 'ADMIN' && (
               <div className="space-y-8">
-                {/* Create Match */}
+                {/* Create Match Form */}
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
                   <h3 className="text-lg font-bold text-purple-300 flex items-center gap-2">
                     <PlusCircle className="w-5 h-5" /> Schedule New Match
@@ -464,35 +650,90 @@ export default function App() {
                   </form>
                 </div>
 
-                {/* Evaluate Match */}
-                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
+                {/* Evaluate Match Scores - Grouped by Date */}
+                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-6">
                   <h3 className="text-lg font-bold text-purple-300 flex items-center gap-2">
                     <CheckCircle className="w-5 h-5" /> Evaluate Match Scores & Award Points
                   </h3>
-                  {matches.map((m) => (
-                      <div key={m.id} className="bg-slate-900 p-4 rounded-lg flex flex-col md:flex-row justify-between items-center gap-4">
-                        <span className="font-semibold">{m.homeTeam} vs {m.awayTeam}</span>
-                        <div className="flex items-center gap-2">
-                          <input
-                              type="number" min="0" placeholder="Home" className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white"
-                              value={scoreInputs[m.id]?.home ?? ''}
-                              onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], home: e.target.value } })}
-                          />
-                          <span>:</span>
-                          <input
-                              type="number" min="0" placeholder="Away" className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white"
-                              value={scoreInputs[m.id]?.away ?? ''}
-                              onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], away: e.target.value } })}
-                          />
-                          <button
-                              onClick={() => handleUpdateAndEvaluate(m.id)}
-                              className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded font-bold transition text-sm ml-2"
-                          >
-                            Save Score & Evaluate
-                          </button>
-                        </div>
-                      </div>
-                  ))}
+
+                  {Object.keys(groupedMatches).length === 0 ? (
+                      <p className="text-slate-400">No scheduled matches found.</p>
+                  ) : (
+                      Object.entries(groupedMatches).map(([dateLabel, dateMatches]) => (
+                          <div key={dateLabel} className="space-y-3">
+                            {/* Date Divider */}
+                            <div className="bg-slate-900/90 px-4 py-2 rounded-lg border-l-4 border-purple-500 flex justify-between items-center">
+                              <span className="font-bold text-purple-300 text-sm">{dateLabel}</span>
+                              <span className="text-xs text-slate-400">{dateMatches.length} Match(es)</span>
+                            </div>
+
+                            {/* Matches List */}
+                            <div className="space-y-3 pl-0 md:pl-2">
+                              {dateMatches.map((m) => {
+                                const timeStatus = getMatchTimeStatus(m.kickoffTime);
+                                const kickoffTimeFormatted = m.kickoffTime
+                                    ? new Date(m.kickoffTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                    : '';
+
+                                return (
+                                    <div key={m.id} className="bg-slate-900 p-4 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
+                                      {/* Left: Match Info & Live Timer */}
+                                      <div className="flex flex-col items-center md:items-start w-full md:w-auto">
+                                        <div className="flex items-center gap-4 text-base font-semibold">
+                                          <span className="w-28 text-right truncate">{m.homeTeam}</span>
+                                          <span className="bg-slate-800 px-3 py-1 rounded text-xs text-purple-300 border border-purple-900">
+                                  {m.finalHomeGoals !== null && m.finalAwayGoals !== null && m.finalHomeGoals !== undefined && m.finalAwayGoals !== undefined
+                                      ? `${m.finalHomeGoals} : ${m.finalAwayGoals}`
+                                      : 'VS'}
+                                </span>
+                                          <span className="w-28 text-left truncate">{m.awayTeam}</span>
+                                        </div>
+
+                                        <div className="mt-2 flex items-center gap-2 text-xs">
+                                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                          <span className="text-slate-400">{kickoffTimeFormatted}</span>
+                                          <span className="text-slate-600">•</span>
+                                          <span className={`font-medium ${
+                                              timeStatus.status === 'LIVE'
+                                                  ? 'text-emerald-400 animate-pulse font-bold'
+                                                  : timeStatus.status === 'FINISHED'
+                                                      ? 'text-slate-400'
+                                                      : 'text-amber-400/90'
+                                          }`}>
+                                  {timeStatus.text}
+                                </span>
+                                        </div>
+                                      </div>
+
+                                      {/* Right: Score Form & Submit Button */}
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                            type="number" min="0" placeholder="Home"
+                                            className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white focus:outline-none focus:border-purple-500"
+                                            value={scoreInputs[m.id]?.home ?? ''}
+                                            onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], home: e.target.value } })}
+                                        />
+                                        <span>:</span>
+                                        <input
+                                            type="number" min="0" placeholder="Away"
+                                            className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white focus:outline-none focus:border-purple-500"
+                                            value={scoreInputs[m.id]?.away ?? ''}
+                                            onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], away: e.target.value } })}
+                                        />
+                                        <button
+                                            onClick={() => handleUpdateAndEvaluate(m.id)}
+                                            className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded font-bold transition text-sm ml-2 text-white"
+                                        >
+                                          Save Score & Evaluate
+                                        </button>
+                                      </div>
+                                    </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                      ))
+                  )}
                 </div>
               </div>
           )}

@@ -44,4 +44,8 @@ public class UserService {
                     return userRepository.save(existingUser);
                 });
     }
+
+    public Optional<User> findByUsername(String username) {
+        return userRepository.findByUsername(username);
+    }
 }

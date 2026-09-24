@@ -21,7 +21,6 @@ public class ScoringService {
     private final PredictionRepository predictionRepository;
     private final UserRepository userRepository;
 
-    // Spring automatically injects all 3 concrete strategy beans here!
     private final List<ScoringStrategy> scoringStrategies;
 
     /**
@@ -32,40 +31,34 @@ public class ScoringService {
         Match match = matchRepository.findById(matchId)
                 .orElseThrow(() -> new IllegalArgumentException("Match not found with ID: " + matchId));
 
-
-//      isEvaluated = true means the match has ended, official final scores were entered,
-//      every user's prediction was scored, and user total points were updated.
-//      Checking if (match.isEvaluated()) prevents an admin from accidentally triggering points calculation twice
-//      for the same match.
-        if (match.isEvaluated()) {
-            throw new IllegalStateException("Match has already been evaluated!");
-        }
-
-        // 1. Update match final score
-
-        match.setFinalHomeGoals(finalHomeGoals);
-        match.setFinalAwayGoals(finalAwayGoals);
-        match.setEvaluated(true);
-        matchRepository.save(match);
-
-        // 2. Fetch all predictions submitted for this match
+        // 1. Fetch all predictions submitted for this match
         List<Prediction> predictions = predictionRepository.findByMatchId(matchId);
 
-        // 3. Evaluate each prediction against our strategies
+        // 2. Evaluate each prediction against our strategies
         for (Prediction prediction : predictions) {
-            int points = this.calculatePointsForPrediction(
+            int newPoints = this.calculatePointsForPrediction(
                     finalHomeGoals, finalAwayGoals,
                     prediction.getPredictedHomeGoals(), prediction.getPredictedAwayGoals()
             );
 
-            prediction.setPointsEarned(points);
+            // Deduct old points if this match was evaluated previously
+            int oldPoints = prediction.getPointsEarned() != null ? prediction.getPointsEarned() : 0;
+            int pointDifference = newPoints - oldPoints;
+
+            prediction.setPointsEarned(newPoints);
             predictionRepository.save(prediction);
 
-            // 4. Update the user's total leaderboard points
+            // 3. Adjust the user's total leaderboard points smoothly
             User user = prediction.getUser();
-            user.setTotalPoints(user.getTotalPoints() + points);
+            user.setTotalPoints(user.getTotalPoints() + pointDifference);
             userRepository.save(user);
         }
+
+        // 4. Update match final score & evaluation flag
+        match.setFinalHomeGoals(finalHomeGoals);
+        match.setFinalAwayGoals(finalAwayGoals);
+        match.setEvaluated(true);
+        matchRepository.save(match);
     }
 
     private int calculatePointsForPrediction(int actualHome, int actualAway, int predHome, int predAway) {

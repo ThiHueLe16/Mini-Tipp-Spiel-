@@ -20,6 +20,14 @@ public class UserController {
         return ResponseEntity.ok(userService.createUser(user));
     }
 
+    // 1.THIS METHOD FOR LOGIN SEARCH
+    @GetMapping("/search")
+    public ResponseEntity<User> getUserByUsername(@RequestParam String username) {
+        return userService.findByUsername(username)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     @GetMapping("/leaderboard")
     public ResponseEntity<List<User>> getLeaderboard() {
         return ResponseEntity.ok(userService.getLeaderboard());

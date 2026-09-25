@@ -5,7 +5,9 @@ import {
   loginUser, createMatch, updateMatchScore, evaluateMatch,
   getUserPredictions
 } from './api/client';
-import { Trophy, Shield, Clock, Users, LogOut, PlusCircle, CheckCircle, UserCheck, Award } from 'lucide-react';
+
+// Line 10 — Add UserCheck to the import
+import { Trash2, Users, Shield, Clock, PlusCircle, Play, Square, CheckSquare, Activity, X, UserCheck, Trophy, LogOut, Award } from 'lucide-react';
 
 export default function App() {
   // Session & User State
@@ -25,11 +27,38 @@ export default function App() {
   const [predictions, setPredictions] = useState({});
   const [now, setNow] = useState(new Date());
 
+  // Store Match Events locally / in memory per match: { [matchId]: [ { minute, type, team, player, text } ] }
+  const [matchEvents, setMatchEvents] = useState(() => {
+    const saved = localStorage.getItem('app_match_events');
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  // Manual status override state for Admin (e.g., 'FINISHED' or 'LIVE')
+  const [matchStatusOverrides, setMatchStatusOverrides] = useState(() => {
+    const saved = localStorage.getItem('app_status_overrides');
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  // Selected Match for Timeline Modal
+  const [selectedMatchForTimeline, setSelectedMatchForTimeline] = useState(null);
+
   // Admin Form State
   const [newHomeTeam, setNewHomeTeam] = useState('');
   const [newAwayTeam, setNewAwayTeam] = useState('');
   const [newKickoff, setNewKickoff] = useState('');
   const [scoreInputs, setScoreInputs] = useState({});
+
+  // Admin Event Logging Form State (keyed by match ID)
+  const [eventInputs, setEventInputs] = useState({});
+  const handleEventInputChange = (matchId, field, value) => {
+    setEventInputs((prev) => ({
+      ...prev,
+      [matchId]: {
+        ...(prev[matchId] || {team: 'HOME', type: 'GOAL', player: '', minute: ''}),
+        [field]: value,
+      },
+    }));
+  };
 
   // Queue State
   const [queueStatus, setQueueStatus] = useState(null);
@@ -43,13 +72,19 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // Keep live time updated every 30 seconds
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 30000);
+    const timer = setInterval(() => setNow(new Date()), 10000);
     return () => clearInterval(timer);
   }, []);
 
-  // Queue polling
+  useEffect(() => {
+    localStorage.setItem('app_match_events', JSON.stringify(matchEvents));
+  }, [matchEvents]);
+
+  useEffect(() => {
+    localStorage.setItem('app_status_overrides', JSON.stringify(matchStatusOverrides));
+  }, [matchStatusOverrides]);
+
   useEffect(() => {
     let interval;
     if (inQueue && currentUser) {
@@ -110,12 +145,11 @@ export default function App() {
     }
   };
 
-  // Auth Handlers
   const handleAuth = async (e) => {
     e.preventDefault();
     try {
       if (isAuthMode === 'register') {
-        const res = await registerUser({ username: usernameInput, email: emailInput, role: roleInput });
+        const res = await registerUser({username: usernameInput, email: emailInput, role: roleInput});
         const user = res.data;
         setCurrentUser(user);
         localStorage.setItem('app_user', JSON.stringify(user));
@@ -136,24 +170,33 @@ export default function App() {
     localStorage.removeItem('app_user');
   };
 
-  // Helper for Match Time and Status
-  const getMatchTimeStatus = (kickoffTimeStr) => {
-    if (!kickoffTimeStr) return { status: 'NO_KICKOFF', text: 'Noch nicht gestartet', isStarted: false };
+  const getMatchTimeStatus = (match) => {
+    if (!match?.kickoffTime) return {
+      status: 'NO_KICKOFF',
+      text: 'Noch nicht gestartet',
+      isStarted: false,
+      elapsedMinutes: 0
+    };
 
-    const kickoff = new Date(kickoffTimeStr);
+    // Check if admin manually forced a status
+    const override = matchStatusOverrides[match.id];
+    if (override === 'FINISHED') {
+      return {status: 'FINISHED', text: 'Finished (FT)', isStarted: true, elapsedMinutes: 90};
+    }
+
+    const kickoff = new Date(match.kickoffTime);
     const diffInMs = now - kickoff;
     const diffInMinutes = Math.floor(diffInMs / (1000 * 60));
 
     if (diffInMinutes < 0) {
-      return { status: 'NOT_STARTED', text: 'Noch nicht gestartet', isStarted: false };
-    } else if (diffInMinutes <= 105) {
-      return { status: 'LIVE', text: `Live: ${diffInMinutes}'`, isStarted: true, elapsedMinutes: diffInMinutes };
+      return {status: 'NOT_STARTED', text: 'Noch nicht gestartet', isStarted: false, elapsedMinutes: 0};
+    } else if (diffInMinutes <= 90 || override === 'LIVE') {
+      return {status: 'LIVE', text: `Live: ${diffInMinutes}'`, isStarted: true, elapsedMinutes: diffInMinutes};
     } else {
-      return { status: 'FINISHED', text: 'Finished', isStarted: true };
+      return {status: 'FINISHED', text: 'Finished (FT)', isStarted: true, elapsedMinutes: 90};
     }
   };
 
-  // Helper to calculate points on the client side if backend hasn't stored pointsEarned directly
   const calculatePoints = (predHome, predAway, finalHome, finalAway) => {
     if (predHome === undefined || predAway === undefined || finalHome === null || finalAway === null || finalHome === undefined || finalAway === undefined) {
       return null;
@@ -164,10 +207,8 @@ export default function App() {
     const fH = parseInt(finalHome, 10);
     const fA = parseInt(finalAway, 10);
 
-    // Exact score match
     if (pH === fH && pA === fA) return 3;
 
-    // Correct outcome (Home win, Away win, Draw)
     const predDiff = pH - pA;
     const finalDiff = fH - fA;
 
@@ -178,15 +219,14 @@ export default function App() {
     return 0;
   };
 
-  // User Handlers
   const handlePredictSubmit = async (match) => {
-    const timeStatus = getMatchTimeStatus(match.kickoffTime);
+    const timeStatus = getMatchTimeStatus(match);
     if (timeStatus.isStarted) {
       alert('The match has already started! You can no longer modify or submit predictions.');
       return;
     }
 
-    const pred = predictions[match.id] || { home: 0, away: 0 };
+    const pred = predictions[match.id] || {home: 0, away: 0};
     try {
       await submitPrediction({
         userId: currentUser.id,
@@ -211,7 +251,6 @@ export default function App() {
     }
   };
 
-  // Admin Handlers
   const handleCreateMatch = async (e) => {
     e.preventDefault();
     try {
@@ -221,10 +260,22 @@ export default function App() {
         kickoffTime: new Date(newKickoff).toISOString()
       });
       alert('Match created successfully!');
-      setNewHomeTeam(''); setNewAwayTeam(''); setNewKickoff('');
+      setNewHomeTeam('');
+      setNewAwayTeam('');
+      setNewKickoff('');
       fetchMatches();
     } catch (err) {
       alert('Failed to create match');
+    }
+  };
+  const handleDeleteMatch = async (matchId) => {
+    if (!window.confirm('Are you sure you want to delete this match?')) return;
+    try {
+      // Add your API call here if available, e.g., await deleteMatch(matchId);
+      setMatches((prev) => prev.filter((m) => m.id !== matchId));
+      alert('Match deleted successfully!');
+    } catch (err) {
+      alert('Failed to delete match');
     }
   };
 
@@ -254,14 +305,90 @@ export default function App() {
     }
   };
 
-  // Group and Sort Matches
+  const toggleMatchFinishState = (matchId) => {
+    const currentStatus = matchStatusOverrides[matchId];
+    const newStatus = currentStatus === 'FINISHED' ? 'LIVE' : 'FINISHED';
+    setMatchStatusOverrides({
+      ...matchStatusOverrides,
+      [matchId]: newStatus
+    });
+  };
+
+  const handleAddMatchEvent = (match) => {
+    // 1. Get the inputs specific to this match (or fall back to defaults)
+    const status = getMatchTimeStatus(match);
+    if (status.status === 'FINISHED' || matchStatusOverrides[match.id] === 'FINISHED') {
+      return alert('This match is finished. Events cannot be logged for finished matches.');
+    }
+    const input = eventInputs[match.id] || {};
+    const player = input.player || '';
+    const team = input.team || 'HOME';
+    const type = input.type || 'GOAL';
+
+    if (!player.trim()) return alert('Please enter a player name');
+
+
+    // Allow string minutes like "45+2" or parse numbers
+    const minute = input.minute ? input.minute : Math.max(1, status.elapsedMinutes);
+    const teamName = team === 'HOME' ? match.homeTeam : match.awayTeam;
+
+    // 2. Generate event text
+    let text = '';
+    if (type === 'GOAL') text = `GOAL! ${player} scores for ${teamName}!`;
+    else if (type === 'YELLOW_CARD') text = `Yellow Card issued to ${player} (${teamName})`;
+    else if (type === 'RED_CARD') text = `RED CARD! ${player} (${teamName}) is sent off!`;
+    else if (type === 'SUB') text = `Substitution for ${teamName}: ${player}`;
+    else if (type === 'PENALTY') text = `Penalty awarded to ${teamName} (${player})`;
+
+    const eventObj = {
+      id: Date.now(),
+      minute,
+      type,
+      team: teamName,
+      player,
+      text
+    };
+
+    const existingEvents = matchEvents[match.id] || [];
+    const updatedEvents = [...existingEvents, eventObj].sort((a, b) => {
+      return parseInt(a.minute, 10) - parseInt(b.minute, 10);
+    });
+
+    setMatchEvents({
+      ...matchEvents,
+      [match.id]: updatedEvents
+    });
+
+    // 3. Auto-increment score if goal
+    if (type === 'GOAL') {
+      const currentScore = scoreInputs[match.id] || {home: 0, away: 0};
+      if (team === 'HOME') {
+        const nextHome = (parseInt(currentScore.home || 0, 10) + 1).toString();
+        setScoreInputs({...scoreInputs, [match.id]: {...currentScore, home: nextHome}});
+      } else {
+        const nextAway = (parseInt(currentScore.away || 0, 10) + 1).toString();
+        setScoreInputs({...scoreInputs, [match.id]: {...currentScore, away: nextAway}});
+      }
+    }
+
+    // 4. Reset inputs for THIS match only
+    setEventInputs((prev) => ({
+      ...prev,
+      [match.id]: {team: 'HOME', type: 'GOAL', player: '', minute: ''}
+    }));
+  };
   const getGroupedMatches = () => {
     const sorted = [...matches].sort((a, b) => new Date(a.kickoffTime) - new Date(b.kickoffTime));
 
     const groups = {};
     sorted.forEach((match) => {
       const dateKey = match.kickoffTime
-          ? new Date(match.kickoffTime).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+          ? new Date(match.kickoffTime).toLocaleDateString(undefined, {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          })
           : 'Unscheduled Matches';
 
       if (!groups[dateKey]) {
@@ -275,13 +402,9 @@ export default function App() {
 
   const groupedMatches = getGroupedMatches();
 
-  // Get User's Total Points from Leaderboard
   const currentUserLeaderboardEntry = leaderboard.find(u => u.id === currentUser?.id || u.username === currentUser?.username);
   const userTotalPoints = currentUserLeaderboardEntry ? (currentUserLeaderboardEntry.totalPoints || 0) : 0;
 
-  // -------------------------------------------------------------
-  // RENDER LOGIN / REGISTER VIEW
-  // -------------------------------------------------------------
   if (!currentUser) {
     return (
         <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 text-slate-100">
@@ -294,12 +417,14 @@ export default function App() {
 
             <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
               <button
+                  type="button"
                   onClick={() => setIsAuthMode('login')}
                   className={`flex-1 py-2 text-sm font-semibold rounded-lg transition ${isAuthMode === 'login' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
               >
                 Log In
               </button>
               <button
+                  type="button"
                   onClick={() => setIsAuthMode('register')}
                   className={`flex-1 py-2 text-sm font-semibold rounded-lg transition ${isAuthMode === 'register' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
               >
@@ -311,8 +436,10 @@ export default function App() {
               <div>
                 <label className="text-xs font-semibold text-slate-400 uppercase">Username</label>
                 <input
-                    type="text" required
-                    value={usernameInput} onChange={(e) => setUsernameInput(e.target.value)}
+                    type="text"
+                    required
+                    value={usernameInput}
+                    onChange={(e) => setUsernameInput(e.target.value)}
                     placeholder="e.g. alex24"
                     className="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500"
                 />
@@ -323,8 +450,10 @@ export default function App() {
                     <div>
                       <label className="text-xs font-semibold text-slate-400 uppercase">Email Address</label>
                       <input
-                          type="email" required
-                          value={emailInput} onChange={(e) => setEmailInput(e.target.value)}
+                          type="email"
+                          required
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
                           placeholder="alex@example.com"
                           className="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500"
                       />
@@ -332,7 +461,8 @@ export default function App() {
                     <div>
                       <label className="text-xs font-semibold text-slate-400 uppercase">Account Type</label>
                       <select
-                          value={roleInput} onChange={(e) => setRoleInput(e.target.value)}
+                          value={roleInput}
+                          onChange={(e) => setRoleInput(e.target.value)}
                           className="w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:outline-none focus:border-blue-500"
                       >
                         <option value="USER">Standard User (Player)</option>
@@ -342,7 +472,10 @@ export default function App() {
                   </>
               )}
 
-              <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 font-bold py-3 rounded-lg transition mt-2">
+              <button
+                  type="submit"
+                  className="w-full bg-blue-600 hover:bg-blue-500 font-bold py-3 rounded-lg transition mt-2 text-white"
+              >
                 {isAuthMode === 'login' ? 'Log In' : 'Create Account'}
               </button>
             </form>
@@ -351,22 +484,20 @@ export default function App() {
     );
   }
 
-  // -------------------------------------------------------------
-  // RENDER MAIN DASHBOARD VIEW
-  // -------------------------------------------------------------
   return (
-      <div className="min-h-screen bg-slate-900 text-slate-100">
+      <div className="min-h-screen bg-slate-900 text-slate-100 relative">
         {/* Header */}
         <header className="bg-slate-800 border-b border-slate-700 p-4">
           <div className="max-w-5xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-3">
-              <Trophy className="text-yellow-400 w-8 h-8" />
+              <Trophy className="text-yellow-400 w-8 h-8"/>
               <div>
                 <h1 className="text-xl font-bold text-blue-400">MiniTippSpiel</h1>
                 <div className="flex items-center gap-2 text-xs text-slate-400">
-                  <UserCheck className="w-3 h-3 text-emerald-400" />
+                  <UserCheck className="w-3 h-3 text-emerald-400"/>
                   <span>{currentUser.username}</span>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${currentUser.role === 'ADMIN' ? 'bg-purple-900 text-purple-300' : 'bg-slate-700 text-slate-300'}`}>
+                  <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${currentUser.role === 'ADMIN' ? 'bg-purple-900 text-purple-300' : 'bg-slate-700 text-slate-300'}`}>
                   {currentUser.role || 'USER'}
                 </span>
                 </div>
@@ -407,7 +538,7 @@ export default function App() {
                   className="p-2 rounded-lg bg-red-900/40 hover:bg-red-800 text-red-300 border border-red-700 ml-2"
                   title="Logout"
               >
-                <LogOut className="w-5 h-5" />
+                <LogOut className="w-5 h-5"/>
               </button>
             </div>
           </div>
@@ -419,10 +550,11 @@ export default function App() {
           {activeTab === 'matches' && (
               <div className="space-y-6">
                 {/* User Points Summary Banner */}
-                <div className="bg-gradient-to-r from-blue-900/60 to-slate-800 p-4 rounded-xl border border-blue-700/50 flex items-center justify-between shadow-lg">
+                <div
+                    className="bg-gradient-to-r from-blue-900/60 to-slate-800 p-4 rounded-xl border border-blue-700/50 flex items-center justify-between shadow-lg">
                   <div className="flex items-center gap-3">
                     <div className="bg-yellow-500/20 p-2.5 rounded-lg border border-yellow-500/30">
-                      <Award className="w-6 h-6 text-yellow-400" />
+                      <Award className="w-6 h-6 text-yellow-400"/>
                     </div>
                     <div>
                       <p className="text-xs text-slate-400 uppercase font-semibold">Your Total Score</p>
@@ -441,44 +573,51 @@ export default function App() {
                 ) : (
                     Object.entries(groupedMatches).map(([dateLabel, dateMatches]) => (
                         <div key={dateLabel} className="space-y-3">
-                          {/* Date Divider Header */}
-                          <div className="bg-slate-800/80 px-4 py-2 rounded-lg border-l-4 border-blue-500 flex justify-between items-center">
+                          <div
+                              className="bg-slate-800/80 px-4 py-2 rounded-lg border-l-4 border-blue-500 flex justify-between items-center">
                             <span className="font-bold text-blue-300 text-sm md:text-base">{dateLabel}</span>
                             <span className="text-xs text-slate-400">{dateMatches.length} Match(es)</span>
                           </div>
 
-                          {/* Matches for this date */}
                           <div className="space-y-3 pl-0 md:pl-2">
                             {dateMatches.map((m) => {
-                              const timeStatus = getMatchTimeStatus(m.kickoffTime);
+                              const timeStatus = getMatchTimeStatus(m);
                               const kickoffTimeFormatted = m.kickoffTime
-                                  ? new Date(m.kickoffTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                  ? new Date(m.kickoffTime).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
                                   : '';
 
                               const userPred = predictions[m.id];
                               const isEvaluated = m.finalHomeGoals !== null && m.finalHomeGoals !== undefined && m.finalAwayGoals !== null && m.finalAwayGoals !== undefined;
 
-                              // Points earned calculation
                               let earnedPoints = userPred?.pointsEarned;
                               if ((earnedPoints === null || earnedPoints === undefined) && isEvaluated && userPred) {
                                 earnedPoints = calculatePoints(userPred.home, userPred.away, m.finalHomeGoals, m.finalAwayGoals);
                               }
 
                               return (
-                                  <div key={m.id} className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
+                                  <div key={m.id}
+                                       className="bg-slate-800 p-5 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
                                     <div className="flex flex-col items-center md:items-start w-full md:w-auto">
-                                      {/* Teams & Score / VS */}
-                                      <div className="flex items-center gap-4 text-lg font-semibold w-full justify-center md:justify-start">
+                                      <div
+                                          className="flex items-center gap-3 text-lg font-semibold w-full justify-center md:justify-start">
                                         <span className="w-28 text-right truncate">{m.homeTeam}</span>
                                         <span className="bg-slate-700 px-3 py-1 rounded text-sm text-slate-300">
                                 {isEvaluated ? `${m.finalHomeGoals} : ${m.finalAwayGoals}` : 'VS'}
                               </span>
                                         <span className="w-28 text-left truncate">{m.awayTeam}</span>
+
+                                        {/* Timeline Modal Trigger Button */}
+                                        <button
+                                            onClick={() => setSelectedMatchForTimeline(m)}
+                                            className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-blue-400 transition ml-1"
+                                            title="View Live Score Timeline & Events"
+                                        >
+                                          <Activity className="w-4 h-4"/>
+                                        </button>
                                       </div>
 
-                                      {/* Match Time & Real-time Status */}
                                       <div className="mt-2 flex items-center gap-2 text-xs">
-                                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                        <Clock className="w-3.5 h-3.5 text-slate-400"/>
                                         <span className="text-slate-400">{kickoffTimeFormatted}</span>
                                         <span className="text-slate-600">•</span>
                                         <span className={`font-medium ${
@@ -493,7 +632,6 @@ export default function App() {
                                       </div>
                                     </div>
 
-                                    {/* Prediction Form & Points Indicator */}
                                     <div className="flex flex-col md:flex-row items-center gap-3">
                                       <div className="flex items-center gap-2">
                                         <input
@@ -505,7 +643,7 @@ export default function App() {
                                             }`}
                                             onChange={(e) => setPredictions({
                                               ...predictions,
-                                              [m.id]: { ...predictions[m.id], home: e.target.value }
+                                              [m.id]: {...predictions[m.id], home: e.target.value}
                                             })}
                                         />
                                         <span>:</span>
@@ -518,7 +656,7 @@ export default function App() {
                                             }`}
                                             onChange={(e) => setPredictions({
                                               ...predictions,
-                                              [m.id]: { ...predictions[m.id], away: e.target.value }
+                                              [m.id]: {...predictions[m.id], away: e.target.value}
                                             })}
                                         />
                                         <button
@@ -534,18 +672,18 @@ export default function App() {
                                         </button>
                                       </div>
 
-                                      {/* Earned Points Badge when evaluated */}
                                       {isEvaluated && (
                                           <div className="mt-2 md:mt-0 flex items-center">
                                             {earnedPoints !== null && earnedPoints !== undefined ? (
-                                                <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${
-                                                    earnedPoints === 3
-                                                        ? 'bg-emerald-950/80 text-emerald-400 border-emerald-600'
-                                                        : earnedPoints === 1
-                                                            ? 'bg-blue-950/80 text-blue-400 border-blue-600'
-                                                            : 'bg-slate-900 text-slate-400 border-slate-700'
-                                                }`}>
-                                    <Award className="w-3.5 h-3.5" />
+                                                <span
+                                                    className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${
+                                                        earnedPoints === 3
+                                                            ? 'bg-emerald-950/80 text-emerald-400 border-emerald-600'
+                                                            : earnedPoints === 1
+                                                                ? 'bg-blue-950/80 text-blue-400 border-blue-600'
+                                                                : 'bg-slate-900 text-slate-400 border-slate-700'
+                                                    }`}>
+                                    <Award className="w-3.5 h-3.5"/>
                                     +{earnedPoints} {earnedPoints === 1 ? 'pt' : 'pts'}
                                   </span>
                                             ) : (
@@ -568,7 +706,7 @@ export default function App() {
           {activeTab === 'leaderboard' && (
               <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
                 <h2 className="text-xl font-bold text-slate-200 mb-4 flex items-center gap-2">
-                  <Users className="text-blue-400" /> Leaderboard
+                  <Users className="text-blue-400"/> Leaderboard
                 </h2>
                 <table className="w-full text-left border-collapse">
                   <thead>
@@ -580,7 +718,8 @@ export default function App() {
                   </thead>
                   <tbody>
                   {leaderboard.map((u, idx) => (
-                      <tr key={u.id} className={`border-b border-slate-700/50 ${u.id === currentUser.id ? 'bg-blue-900/30 font-bold' : ''}`}>
+                      <tr key={u.id}
+                          className={`border-b border-slate-700/50 ${u.id === currentUser.id ? 'bg-blue-900/30 font-bold' : ''}`}>
                         <td className="p-3 text-slate-400">#{idx + 1}</td>
                         <td className="p-3 text-slate-100">{u.username} {u.id === currentUser.id && '(You)'}</td>
                         <td className="p-3 text-emerald-400 font-bold">{u.totalPoints || 0} pts</td>
@@ -593,19 +732,21 @@ export default function App() {
 
           {/* TRIKOT QUEUE TAB */}
           {activeTab === 'trikot' && (
-              <div className="bg-slate-800 rounded-xl border border-slate-700 p-8 text-center max-w-lg mx-auto space-y-6">
-                <Shield className="w-16 h-16 text-yellow-400 mx-auto" />
+              <div
+                  className="bg-slate-800 rounded-xl border border-slate-700 p-8 text-center max-w-lg mx-auto space-y-6">
+                <Shield className="w-16 h-16 text-yellow-400 mx-auto"/>
                 <h2 className="text-2xl font-bold">Limited Trikot Promotion</h2>
                 <p className="text-slate-400">Enter the live waiting room to claim your jersey!</p>
 
                 {!inQueue ? (
-                    <button onClick={handleJoinQueue} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition">
+                    <button onClick={handleJoinQueue}
+                            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition">
                       Enter Waiting Room
                     </button>
                 ) : (
                     <div className="bg-slate-900 p-6 rounded-lg border border-slate-700 space-y-3">
                       <div className="flex justify-center items-center gap-2 text-slate-400">
-                        <Clock className="animate-spin text-blue-400" /> Live Status
+                        <Clock className="animate-spin text-blue-400"/> Live Status
                       </div>
                       {queueStatus?.canAccessSubmissionPage ? (
                           <p className="text-emerald-400 font-bold text-lg">It's your turn! Pass token granted.</p>
@@ -623,10 +764,9 @@ export default function App() {
           {/* ADMIN PANEL TAB */}
           {activeTab === 'admin' && currentUser.role === 'ADMIN' && (
               <div className="space-y-8">
-                {/* Create Match Form */}
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
                   <h3 className="text-lg font-bold text-purple-300 flex items-center gap-2">
-                    <PlusCircle className="w-5 h-5" /> Schedule New Match
+                    <PlusCircle className="w-5 h-5"/> Schedule New Match
                   </h3>
                   <form onSubmit={handleCreateMatch} className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <input
@@ -644,89 +784,161 @@ export default function App() {
                         onChange={(e) => setNewKickoff(e.target.value)}
                         className="bg-slate-900 border border-slate-700 rounded p-2 text-white"
                     />
-                    <button type="submit" className="md:col-span-3 bg-purple-600 hover:bg-purple-500 font-bold py-2 rounded transition">
+                    <button type="submit"
+                            className="md:col-span-3 bg-purple-600 hover:bg-purple-500 font-bold py-2 rounded transition">
                       Create Match
                     </button>
                   </form>
                 </div>
 
-                {/* Evaluate Match Scores - Grouped by Date */}
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-6">
-                  <h3 className="text-lg font-bold text-purple-300 flex items-center gap-2">
-                    <CheckCircle className="w-5 h-5" /> Evaluate Match Scores & Award Points
-                  </h3>
+                  <h3 className="text-lg font-bold text-purple-300">Manage Scores, Events & Lifecycle</h3>
 
                   {Object.keys(groupedMatches).length === 0 ? (
-                      <p className="text-slate-400">No scheduled matches found.</p>
+                      <p className="text-slate-400">No matches to manage.</p>
                   ) : (
                       Object.entries(groupedMatches).map(([dateLabel, dateMatches]) => (
-                          <div key={dateLabel} className="space-y-3">
-                            {/* Date Divider */}
-                            <div className="bg-slate-900/90 px-4 py-2 rounded-lg border-l-4 border-purple-500 flex justify-between items-center">
-                              <span className="font-bold text-purple-300 text-sm">{dateLabel}</span>
+                          <div key={dateLabel} className="space-y-4">
+                            <div
+                                className="bg-slate-900 px-4 py-2 rounded-lg border-l-4 border-purple-500 flex justify-between items-center">
+                              <span className="font-bold text-purple-300 text-sm md:text-base">{dateLabel}</span>
                               <span className="text-xs text-slate-400">{dateMatches.length} Match(es)</span>
                             </div>
 
-                            {/* Matches List */}
-                            <div className="space-y-3 pl-0 md:pl-2">
+                            <div className="space-y-4 pl-0 md:pl-2">
                               {dateMatches.map((m) => {
-                                const timeStatus = getMatchTimeStatus(m.kickoffTime);
-                                const kickoffTimeFormatted = m.kickoffTime
-                                    ? new Date(m.kickoffTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                                    : '';
+                                const matchStatus = getMatchTimeStatus(m);
+                                const isFinished = matchStatus.status === 'FINISHED';
 
                                 return (
-                                    <div key={m.id} className="bg-slate-900 p-4 rounded-xl border border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
-                                      {/* Left: Match Info & Live Timer */}
-                                      <div className="flex flex-col items-center md:items-start w-full md:w-auto">
-                                        <div className="flex items-center gap-4 text-base font-semibold">
-                                          <span className="w-28 text-right truncate">{m.homeTeam}</span>
-                                          <span className="bg-slate-800 px-3 py-1 rounded text-xs text-purple-300 border border-purple-900">
-                                  {m.finalHomeGoals !== null && m.finalAwayGoals !== null && m.finalHomeGoals !== undefined && m.finalAwayGoals !== undefined
-                                      ? `${m.finalHomeGoals} : ${m.finalAwayGoals}`
-                                      : 'VS'}
-                                </span>
-                                          <span className="w-28 text-left truncate">{m.awayTeam}</span>
+                                    <div key={m.id}
+                                         className="bg-slate-900 p-5 rounded-xl border border-slate-700 space-y-4">
+                                      <div
+                                          className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-3">
+                                        <div>
+                                          <p className="font-bold text-white text-lg">{m.homeTeam} vs {m.awayTeam}</p>
+                                          <p className="text-xs text-slate-400">
+                                            {m.kickoffTime ? new Date(m.kickoffTime).toLocaleTimeString([], {
+                                              hour: '2-digit',
+                                              minute: '2-digit'
+                                            }) : 'No date set'}
+                                            <span
+                                                className="ml-2 font-semibold text-emerald-400">({matchStatus.text})</span>
+                                          </p>
                                         </div>
 
-                                        <div className="mt-2 flex items-center gap-2 text-xs">
-                                          <Clock className="w-3.5 h-3.5 text-slate-400" />
-                                          <span className="text-slate-400">{kickoffTimeFormatted}</span>
-                                          <span className="text-slate-600">•</span>
-                                          <span className={`font-medium ${
-                                              timeStatus.status === 'LIVE'
-                                                  ? 'text-emerald-400 animate-pulse font-bold'
-                                                  : timeStatus.status === 'FINISHED'
-                                                      ? 'text-slate-400'
-                                                      : 'text-amber-400/90'
-                                          }`}>
-                                  {timeStatus.text}
-                                </span>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          {/* Force Match Stop / Resume Button */}
+                                          <button
+                                              onClick={() => toggleMatchFinishState(m.id)}
+                                              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                                  isFinished
+                                                      ? 'bg-amber-600/80 hover:bg-amber-500 text-white'
+                                                      : 'bg-red-600 hover:bg-red-500 text-white'
+                                              }`}
+                                          >
+                                            {isFinished ? <Play className="w-3.5 h-3.5"/> :
+                                                <Square className="w-3.5 h-3.5"/>}
+                                            {isFinished ? 'Reopen Match' : 'Force Finish / Stop Match'}
+                                          </button>
+
+                                          {/* Delete Match Button */}
+                                          <button
+                                              onClick={() => handleDeleteMatch(m.id)}
+                                              className="bg-rose-700/80 hover:bg-rose-600 text-white text-xs px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 transition"
+                                              title="Delete Match"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5"/> Delete
+                                          </button>
+
+                                          <div className="flex items-center gap-2">
+                                            <input
+                                                type="number" min="0" placeholder="Home"
+                                                value={scoreInputs[m.id]?.home ?? ''}
+                                                onChange={(e) => setScoreInputs({
+                                                  ...scoreInputs,
+                                                  [m.id]: {...scoreInputs[m.id], home: e.target.value}
+                                                })}
+                                                className="w-14 bg-slate-800 border border-slate-600 rounded p-1.5 text-center text-white text-sm"
+                                            />
+                                            <span className="text-sm font-bold">:</span>
+                                            <input
+                                                type="number" min="0" placeholder="Away"
+                                                value={scoreInputs[m.id]?.away ?? ''}
+                                                onChange={(e) => setScoreInputs({
+                                                  ...scoreInputs,
+                                                  [m.id]: {...scoreInputs[m.id], away: e.target.value}
+                                                })}
+                                                className="w-14 bg-slate-800 border border-slate-600 rounded p-1.5 text-center text-white text-sm"
+                                            />
+                                            <button
+                                                onClick={() => handleUpdateAndEvaluate(m.id)}
+                                                className="bg-purple-600 hover:bg-purple-500 font-bold px-3 py-1.5 rounded transition text-xs flex items-center gap-1"
+                                            >
+                                              <CheckSquare className="w-3.5 h-3.5"/> Save & Evaluate
+                                            </button>
+                                          </div>
                                         </div>
                                       </div>
 
-                                      {/* Right: Score Form & Submit Button */}
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                            type="number" min="0" placeholder="Home"
-                                            className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white focus:outline-none focus:border-purple-500"
-                                            value={scoreInputs[m.id]?.home ?? ''}
-                                            onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], home: e.target.value } })}
-                                        />
-                                        <span>:</span>
-                                        <input
-                                            type="number" min="0" placeholder="Away"
-                                            className="w-16 bg-slate-800 border border-slate-700 p-2 text-center rounded text-white focus:outline-none focus:border-purple-500"
-                                            value={scoreInputs[m.id]?.away ?? ''}
-                                            onChange={(e) => setScoreInputs({ ...scoreInputs, [m.id]: { ...scoreInputs[m.id], away: e.target.value } })}
-                                        />
-                                        <button
-                                            onClick={() => handleUpdateAndEvaluate(m.id)}
-                                            className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded font-bold transition text-sm ml-2 text-white"
-                                        >
-                                          Save Score & Evaluate
-                                        </button>
-                                      </div>
+                                      {/* Detailed Live Match Event Creator */}
+                                      {!isFinished ? (
+                                          <div
+                                              className="bg-slate-800/80 p-3.5 rounded-lg border border-slate-700/80 space-y-3">
+                                            <p className="text-xs font-bold text-purple-300 uppercase tracking-wider">Log
+                                              Live Match Event (Cards, Goals, VAR)</p>
+                                            <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                                              <select
+                                                  value={eventInputs[m.id]?.team || 'HOME'}
+                                                  onChange={(e) => handleEventInputChange(m.id, 'team', e.target.value)}
+                                                  className="bg-slate-900 border border-slate-700 text-xs rounded p-2 text-white"
+                                              >
+                                                <option value="HOME">{m.homeTeam} (Home)</option>
+                                                <option value="AWAY">{m.awayTeam} (Away)</option>
+                                              </select>
+
+                                              <select
+                                                  value={eventInputs[m.id]?.type || 'GOAL'}
+                                                  onChange={(e) => handleEventInputChange(m.id, 'type', e.target.value)}
+                                                  className="bg-slate-900 border border-slate-700 text-xs rounded p-2 text-white"
+                                              >
+                                                <option value="GOAL">⚽ Goal</option>
+                                                <option value="YELLOW_CARD">🟨 Yellow Card</option>
+                                                <option value="RED_CARD">🟥 Red Card</option>
+                                                <option value="PENALTY">🎯 Penalty</option>
+                                                <option value="SUB">🔄 Substitution</option>
+                                              </select>
+
+                                              <input
+                                                  type="text"
+                                                  placeholder="Player Name"
+                                                  value={eventInputs[m.id]?.player || ''}
+                                                  onChange={(e) => handleEventInputChange(m.id, 'player', e.target.value)}
+                                                  className="bg-slate-900 border border-slate-700 text-xs rounded p-2 text-white"
+                                              />
+
+                                              <input
+                                                  type="text"
+                                                  placeholder={`Min (Default: ${matchStatus.elapsedMinutes}')`}
+                                                  value={eventInputs[m.id]?.minute || ''}
+                                                  onChange={(e) => handleEventInputChange(m.id, 'minute', e.target.value)}
+                                                  className="bg-slate-900 border border-slate-700 text-xs rounded p-2 text-white"
+                                              />
+
+                                              <button
+                                                  onClick={() => handleAddMatchEvent(m)}
+                                                  className="bg-blue-600 hover:bg-blue-500 font-bold text-xs py-2 rounded text-white transition"
+                                              >
+                                                + Record Event
+                                              </button>
+                                            </div>
+                                          </div>
+                                      ) : (
+                                          <div
+                                              className="bg-slate-900/60 p-3 rounded-lg border border-slate-800 text-center text-xs text-slate-400 italic">
+                                            🔒 Match is finished. Event logging is locked.
+                                          </div>
+                                      )}
                                     </div>
                                 );
                               })}
@@ -738,6 +950,78 @@ export default function App() {
               </div>
           )}
         </main>
+
+        {/* MATCH TIMELINE MODAL */}
+        {selectedMatchForTimeline && (
+            <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div
+                  className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl">
+                <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-900/50">
+                  <div className="flex items-center gap-2 text-blue-400 font-bold">
+                    <Activity className="w-5 h-5"/> Match Events & Live Stats
+                  </div>
+                  <button
+                      onClick={() => setSelectedMatchForTimeline(null)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700"
+                  >
+                    <X className="w-5 h-5"/>
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-6">
+                  <div className="text-center bg-slate-900 p-4 rounded-xl border border-slate-700">
+                    <div className="flex justify-between items-center text-xl font-extrabold">
+                      <span className="w-2/5 text-right">{selectedMatchForTimeline.homeTeam}</span>
+                      <span className="bg-blue-600 text-white px-3 py-1 rounded-lg text-lg">
+                      {selectedMatchForTimeline.finalHomeGoals ?? scoreInputs[selectedMatchForTimeline.id]?.home ?? 0} : {selectedMatchForTimeline.finalAwayGoals ?? scoreInputs[selectedMatchForTimeline.id]?.away ?? 0}
+                    </span>
+                      <span className="w-2/5 text-left">{selectedMatchForTimeline.awayTeam}</span>
+                    </div>
+                    <p className="text-xs text-emerald-400 font-bold mt-2 animate-pulse">
+                      {getMatchTimeStatus(selectedMatchForTimeline).text}
+                    </p>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Live Event
+                      Timeline</h4>
+                    <div className="space-y-3 max-h-64 overflow-y-auto pr-2">
+                      {(!matchEvents[selectedMatchForTimeline.id] || matchEvents[selectedMatchForTimeline.id].length === 0) ? (
+                          <div className="text-center py-6 text-slate-500 text-xs italic bg-slate-900/40 rounded-lg">
+                            No events recorded for this match yet.
+                          </div>
+                      ) : (
+                          matchEvents[selectedMatchForTimeline.id].map((evt) => (
+                              <div key={evt.id}
+                                   className="flex items-center gap-3 bg-slate-900/80 p-3 rounded-xl border border-slate-700/60 text-sm">
+                              <span
+                                  className="bg-slate-800 border border-slate-600 text-blue-400 text-xs font-mono font-extrabold px-2 py-1 rounded-md">
+                                {evt.minute}'
+                              </span>
+                                <div className="flex-1">
+                                  <p className={`font-semibold flex items-center gap-1.5 ${
+                                      evt.type === 'GOAL' ? 'text-yellow-400' :
+                                          evt.type === 'YELLOW_CARD' ? 'text-amber-300' :
+                                              evt.type === 'RED_CARD' ? 'text-red-400' : 'text-slate-200'
+                                  }`}>
+                                    {evt.type === 'GOAL' && '⚽'}
+                                    {evt.type === 'YELLOW_CARD' && '🟨'}
+                                    {evt.type === 'RED_CARD' && '🟥'}
+                                    {evt.type === 'PENALTY' && '🎯'}
+                                    {evt.type === 'SUB' && '🔄'}
+                                    {evt.text}
+                                  </p>
+                                  <p className="text-[10px] text-slate-500 uppercase">{evt.team}</p>
+                                </div>
+                              </div>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+        )}
       </div>
   );
 }

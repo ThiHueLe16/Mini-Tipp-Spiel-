@@ -62,13 +62,13 @@ public class MatchController {
 
 
 
-    // ADD THIS ENDPOINT FOR UPDATING SCORES
+    // ADD THIS ENDPOINT FOR UPDATING SCORES/ EVENTS
     @PutMapping("/admin/{matchId}/score")
     public ResponseEntity<Match> updateMatchScore(
             @PathVariable Long matchId,
             @RequestBody MatchScoreDto scoreDto) {
 
-        return matchService.updateMatchScore(matchId, scoreDto.finalHomeGoals(), scoreDto.finalAwayGoals())
+        return matchService.updateMatchScore(matchId, scoreDto)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }

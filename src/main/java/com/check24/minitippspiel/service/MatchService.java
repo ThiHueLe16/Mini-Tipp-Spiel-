@@ -1,7 +1,9 @@
 package com.check24.minitippspiel.service;
 
 import com.check24.minitippspiel.dto.MatchCreateDto;
+import com.check24.minitippspiel.dto.MatchScoreDto;
 import com.check24.minitippspiel.model.Match;
+import com.check24.minitippspiel.model.MatchEvent;
 import com.check24.minitippspiel.repository.MatchRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -58,10 +60,28 @@ public class MatchService {
     }
 
     @Transactional
-    public Optional<Match> updateMatchScore(Long matchId, Integer actualHomeGoals, Integer actualAwayGoals) {
+    public Optional<Match> updateMatchScore(Long matchId, MatchScoreDto scoreDto) {
         return matchRepository.findById(matchId).map(match -> {
-            match.setFinalHomeGoals(actualHomeGoals);
-            match.setFinalAwayGoals(actualAwayGoals);
+            match.setFinalHomeGoals(scoreDto.finalHomeGoals());
+            match.setFinalAwayGoals(scoreDto.finalAwayGoals());
+
+            // Clear existing timeline events and replace with new payload
+            match.getEvents().clear();
+
+            if (scoreDto.events() != null && !scoreDto.events().isEmpty()) {
+                for (var eventDto : scoreDto.events()) {
+                    MatchEvent event = MatchEvent.builder()
+                            .match(match)
+                            .minute(eventDto.minute())
+                            .type(eventDto.type())
+                            .team(eventDto.team())
+                            .player(eventDto.player())
+                            .description(eventDto.description())
+                            .build();
+                    match.getEvents().add(event);
+                }
+            }
+
             return matchRepository.save(match);
         });
     }

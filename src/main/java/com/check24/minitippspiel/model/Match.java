@@ -4,6 +4,8 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "matches")
@@ -33,4 +35,10 @@ public class Match {
     @Builder.Default
     @Column(nullable = false)
     private boolean isEvaluated = false;
+
+//    Establishes the @OneToMany relationship so fetching a Match returns its list of events.
+//    orphanRemoval = true ensures deleted/replaced events are removed from the database automatically.
+    @OneToMany(mappedBy = "match", cascade = CascadeType.ALL, orphanRemoval = true)
+    @Builder.Default
+    private List<MatchEvent> events = new ArrayList<>();
 }
